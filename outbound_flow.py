@@ -14,16 +14,14 @@ import asyncio
 load_dotenv(override=True)
 
 base_url = os.getenv("WEBRTC_URL")
-ICS_SEARCH_API = "https://sacs-backend.vibhohcm.com/api/knowledge/search"
-ICS_AGENT_AVAILABLE_API = "https://sacs-backend.vibhohcm.com/api/config/agent-availability"
 
 # HuggingFace configuration
 HF_API_URL = "https://router.huggingface.co/v1"
 HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"
 
-# 🚨 OUTBOUND-SPECIFIC SYSTEM PROMPT - NATURAL CONVERSATION
+# 🚨 OUTBOUND-SPECIFIC SYSTEM PROMPT - GENERIC FOR ANY BUSINESS
 OUTBOUND_SYSTEM_PROMPT = """
-You are a friendly, professional assistant from Indian Consulate Services making an outbound call.
+You are a friendly, professional assistant from {company_name} making an outbound call.
 
 🎯 CRITICAL CONTEXT:
 You STARTED to deliver this message to the user:
