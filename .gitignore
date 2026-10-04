@@ -2,3 +2,4 @@
 outbound_calls_env/
 new_env/
 proactive_env/
+.env
