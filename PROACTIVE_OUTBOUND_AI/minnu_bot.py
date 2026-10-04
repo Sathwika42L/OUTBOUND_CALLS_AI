@@ -28,7 +28,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.piper.tts import PiperTTSService
-from pipecat.services.ollama.llm import OLLamaLLMService
+from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.audio.filters.rnnoise_filter import RNNoiseFilter
@@ -86,24 +86,33 @@ class MuteSTTDuringTTS(FrameProcessor):
 # MAIN BOT LOGIC
 # ═══════════════════════════════════════════════════════════════════════════
 
+
+# Module-level RAG instance — loaded once at startup before any call arrives.
+# run_bot() reuses it so the cold-start delay never blocks a live WebRTC connection.
+_shared_rag: "SimpleRAG | None" = None
+
+
 async def run_bot(transport: BaseTransport):
     """Main bot logic"""
     logger.info("Starting DYNAMIC PROACTIVE OUTBOUND BOT (Pipecat Flows)")
 
-    # RAG: one shared instance per process (loaded in a thread so a cold start
-    # doesn't freeze the event loop).
-    rag_system = None
-    try:
-        rag_system = await asyncio.to_thread(get_rag)
-        if rag_system.count() == 0:
-            logger.error("=" * 80)
-            logger.error("❌ NO DOCUMENTS IN RAG DATABASE - the call will run WITHOUT verified facts")
-            logger.error("Upload documents first:")
-            logger.error("  python test_rag_simple.py --upload document.pdf")
-            logger.error("=" * 80)
+    # Reuse the module-level instance loaded at startup; fall back to a fresh
+    # load only if the pre-load somehow didn't run (e.g. direct import).
+    rag_system = _shared_rag
+    if rag_system is None:
+        logger.warning("RAG not pre-loaded; loading now (may delay first call)")
+        try:
+            rag_system = await asyncio.to_thread(SimpleRAG)
+        except Exception as e:
+            logger.exception(f"❌ RAG failed to load - the call will run WITHOUT verified facts: {e}")
             rag_system = None
-    except Exception as e:
-        logger.exception(f"❌ RAG failed to load - the call will run WITHOUT verified facts: {e}")
+
+    if rag_system is not None and rag_system.count() == 0:
+        logger.error("=" * 80)
+        logger.error("❌ NO DOCUMENTS IN RAG DATABASE - the call will run WITHOUT verified facts")
+        logger.error("Upload documents first:")
+        logger.error("  python test_rag_simple.py --upload document.pdf")
+        logger.error("=" * 80)
         rag_system = None
 
     # STT
@@ -126,14 +135,11 @@ async def run_bot(transport: BaseTransport):
         text_aggregation_mode=TextAggregationMode.SENTENCE
     )
     
-    # LLM
-    llm = OLLamaLLMService(
-        base_url=OLLAMA_BASE_URL,
-        settings=OLLamaLLMService.Settings(
-            model="qwen2.5:14b",
-            temperature=0.3,  # More creative for natural conversation
-            top_p=0.8,
-        )
+    # LLM — same Groq backend as minnu.py
+    llm = OpenAILLMService(
+        api_key=os.getenv("GROQ_KEY"),
+        base_url="https://api.groq.com/openai/v1",
+        model=os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
     )
 
     # Context starts EMPTY: the persona (role_messages) comes from the initial Flow node
@@ -330,7 +336,15 @@ async def run_bot(transport: BaseTransport):
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info("Client connected")
+        logger.info("Client connected - scheduling flow init fallback")
+        # on_client_ready fires via RTVI after the data channel handshake.
+        # If that message was queued before the pipeline was ready it may be
+        # replayed, or it may be lost. Either way, we start a small-delay
+        # fallback here so the greeting always fires.
+        async def _fallback_init():
+            await asyncio.sleep(2.0)   # give RTVI / on_client_ready a chance to fire first
+            await _initialize_flow_once()
+        asyncio.ensure_future(_fallback_init())
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
@@ -378,9 +392,11 @@ if __name__ == "__main__":
     logger.info(f"Default customer: {CUSTOMER_NAME}")
     logger.info("=" * 80)
 
-    # Load BGE-large + Qdrant once at startup so the first call isn't slow.
+    # Load BGE-large + Qdrant ONCE at startup and store it in the module-level
+    # variable so run_bot() can reuse it without blocking the WebRTC connection.
     try:
-        SimpleRAG()
+        _shared_rag = SimpleRAG()
+        logger.info(f"✅ RAG pre-loaded ({_shared_rag.count()} chunks)")
     except Exception as e:
         logger.error(f"RAG pre-load failed (will retry per call): {e}")
 

@@ -65,7 +65,7 @@ CUSTOMER_NAME = os.getenv("TEST_CUSTOMER_NAME", "Chanakya")
 
 # Ollama server used by the main LLM and the planner
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://202.164.134.176:11434/v1")
-PLANNER_MODEL = os.getenv("PLANNER_MODEL", "qwen2.5:14b")
+PLANNER_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
 # A phone caller cannot wait 30 s. If the planner / RAG are slower than this the
 # turn continues with a safe fallback instead of dead air.
@@ -643,7 +643,7 @@ class LLMDrivenRAGProcessor(FrameProcessor):
         try:
             facts = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None, self.rag_system.answer_question_outbound(rag_query)
+                    None, lambda: self.rag_system.answer_question_outbound(rag_query)
                 ),
                 timeout=RAG_TIMEOUT_S,
             )
@@ -804,11 +804,15 @@ Customer "Call me tomorrow, I'm busy." -> next_action reschedule, needs_rag fals
         try:
             timeout = aiohttp.ClientTimeout(total=PLANNER_TIMEOUT_S)
 
+            groq_key = os.getenv("GROQ_KEY", "")
+            headers = {"Authorization": f"Bearer {groq_key}"} if groq_key else {}
+
             async with aiohttp.ClientSession(timeout=timeout) as session:
 
                 async with session.post(
-                    f"{OLLAMA_BASE_URL}/chat/completions",
-                    json=payload
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
                 ) as response:
 
                     if response.status != 200:
