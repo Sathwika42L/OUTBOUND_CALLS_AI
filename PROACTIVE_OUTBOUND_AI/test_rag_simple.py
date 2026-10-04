@@ -71,9 +71,15 @@ COLLECTION_NAME = "knowledge_base"
 EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"  # BGE-large
 EMBEDDING_DIM = 1024
 
-# LLM for natural answers (using your Ollama)
-LLM_BASE_URL = "http://202.164.134.176:11434/v1"
-LLM_MODEL = "qwen2.5:14b"
+# # LLM for natural answers (using your Ollama)
+# LLM_BASE_URL = "http://202.164.134.176:11434/v1"
+# LLM_MODEL = "qwen2.5:14b"
+from dotenv import load_dotenv
+load_dotenv()
+
+# LLM for natural answers (Groq)
+LLM_BASE_URL = "https://api.groq.com/openai/v1"
+LLM_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")   # same model as bot file
 
 # Chunking - smaller than before (400 -> 220 words) so each chunk stays
 # topically tight, which improves embedding precision and keeps the
@@ -136,7 +142,8 @@ class SimpleRAG:
         logger.info("📊 Total chunks: {}", count)
 
         # Initialize LLM
-        self.llm = OpenAI(base_url=LLM_BASE_URL, api_key="not-needed")
+        # self.llm = OpenAI(base_url=LLM_BASE_URL, api_key="not-needed")
+        self.llm = OpenAI(base_url=LLM_BASE_URL, api_key=os.getenv("GROQ_KEY"))
         logger.info("✅ LLM ready: {}", LLM_MODEL)
         logger.info("=" * 80)
 

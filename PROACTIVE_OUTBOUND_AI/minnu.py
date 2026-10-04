@@ -74,7 +74,8 @@ CAMPAIGN = {
     "knowledge_base": "personal_loans"
 }
 
-CUSTOMER_NAME = os.getenv("TEST_CUSTOMER_NAME", "Chanakya")
+CUSTOMER_NAME = os.getenv("TEST_CUSTOMER_NAME", "Sathwika")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")   # the model that already works for you
 
 # ═══════════════════════════════════════════════════════════════════════════
 # LLM SYSTEM PROMPT - DYNAMIC OUTBOUND AGENT
@@ -1070,7 +1071,7 @@ Customer "Call me tomorrow, I'm busy." -> next_action reschedule, needs_rag fals
 """
 
         payload = {
-            "model": "qwen2.5:14b",
+            "model": GROQ_MODEL,
             "messages": [
                 {
                     "role": "system",
@@ -1096,9 +1097,14 @@ Customer "Call me tomorrow, I'm busy." -> next_action reschedule, needs_rag fals
 
             async with aiohttp.ClientSession(timeout=timeout) as session:
 
+                # async with session.post(
+                #     "http://202.164.134.176:11434/v1/chat/completions",
+                #     json=payload
+                # ) as response:
                 async with session.post(
-                    "http://202.164.134.176:11434/v1/chat/completions",
-                    json=payload
+                    "https://api.groq.com/openai/v1/chat/completions",   # was the 202.164... Ollama URL
+                    json=payload,
+                    headers={"Authorization": f"Bearer {os.getenv('GROQ_KEY')}"},
                 ) as response:
 
                     if response.status != 200:
@@ -1484,24 +1490,39 @@ async def run_bot(transport):
     )
     
     # TTS
-    tts = PiperTTSService(
-        use_cuda=True,
-        settings=PiperTTSService.Settings(
-            voice="en_US-hfc_female-medium"
-        ),
+    # tts = PiperTTSService(
+    #     use_cuda=True,
+    #     settings=PiperTTSService.Settings(
+    #         voice="en_US-hfc_female-medium"
+    #     ),
+    #     text_aggregation_mode=TextAggregationMode.SENTENCE
+    # )
+
+    from smart_tts_service import VoiceCloneTTSService
+
+    tts = VoiceCloneTTSService(
+        ref_audio="sathwika_voice.mp3",
+        ref_text="Hi.Hello how are you all,I am sathwika,Today i am calling you to make happy, once again congratulations,have a nice day",
         text_aggregation_mode=TextAggregationMode.SENTENCE
     )
     
     # LLM
-    llm = OLLamaLLMService(
-        base_url="http://202.164.134.176:11434/v1",
-        settings=OLLamaLLMService.Settings(
-            model="qwen2.5:14b",
-            temperature=0.3,  # More creative for natural conversation
-            top_p=0.8,
-        )
+    # llm = OLLamaLLMService(
+    #     base_url="http://202.164.134.176:11434/v1",
+    #     settings=OLLamaLLMService.Settings(
+    #         model="qwen2.5:14b",
+    #         temperature=0.3,  # More creative for natural conversation
+    #         top_p=0.8,
+    #     )
+    # )
+    from pipecat.services.openai.llm import OpenAILLMService
+
+    llm = OpenAILLMService(
+        api_key=os.getenv("GROQ_KEY"),
+        base_url="https://api.groq.com/openai/v1",
+        model="qwen/qwen3.8-27b",
     )
-    
+        
     # Context - NO TOOLS (pure conversation, no function calling)
     context = LLMContext(
         messages=[{
@@ -1603,8 +1624,12 @@ Say exactly this (or a close natural variant):
 
 Wait for the customer to respond. That is all for this first message."""
         
+        # context.add_message({
+        #     "role": "system",
+        #     "content": greeting_prompt
+        # })
         context.add_message({
-            "role": "system",
+            "role": "user",          # was "system"
             "content": greeting_prompt
         })
         
