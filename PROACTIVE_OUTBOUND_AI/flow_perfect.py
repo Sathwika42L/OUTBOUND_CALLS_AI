@@ -61,16 +61,16 @@ CAMPAIGN = {
     "knowledge_base": "personal_loans"
 }
 
-CUSTOMER_NAME = os.getenv("TEST_CUSTOMER_NAME", "Chanakya")
+CUSTOMER_NAME = os.getenv("TEST_CUSTOMER_NAME", "Sathwika")
 
 # Ollama server used by the main LLM and the planner
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://202.164.134.176:11434/v1")
-PLANNER_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://16.192.104.155:11434/v1")
+PLANNER_MODEL = os.getenv("GROQ_MODEL", "qwen2.5:14b")
 
 # A phone caller cannot wait 30 s. If the planner / RAG are slower than this the
 # turn continues with a safe fallback instead of dead air.
-PLANNER_TIMEOUT_S = float(os.getenv("PLANNER_TIMEOUT_S", "8"))
-RAG_TIMEOUT_S = float(os.getenv("RAG_TIMEOUT_S", "6"))
+PLANNER_TIMEOUT_S = float(os.getenv("PLANNER_TIMEOUT_S", "120"))
+RAG_TIMEOUT_S = float(os.getenv("RAG_TIMEOUT_S", "60"))
 
 # Every per-turn instruction we add to the context starts with this label so it
 # can be found and replaced on the next turn (see LLMDrivenRAGProcessor._inject).
@@ -569,6 +569,11 @@ class LLMDrivenRAGProcessor(FrameProcessor):
         # (customer-turn number, text) of the turn already planned
         self._handled_turn = None
 
+        # Specialist-offer tracking (Part 2 loop prevention)
+        self._specialist_offers_made = 0        # total offer_specialist turns so far
+        self._turns_since_last_offer = 0        # customer turns elapsed since last offer
+        self._last_action = None                # final next_action of the previous turn
+
     # ------------------------------------------------------------------
     # small helpers
     # ------------------------------------------------------------------
@@ -595,8 +600,10 @@ class LLMDrivenRAGProcessor(FrameProcessor):
         return bool(value)
 
     def _is_directive(self, msg) -> bool:
+        # Accept both "system" (old location) and "user" (new location – appended
+        # after the customer's message so Qwen's chat template keeps it close).
         return (
-            self._role(msg) == "system"
+            self._role(msg) in ("system", "user")
             and self._msg_text(msg).startswith(DIRECTIVE_TAG)
         )
 
@@ -613,23 +620,20 @@ class LLMDrivenRAGProcessor(FrameProcessor):
 
         Every earlier turn directive (facts, reschedule, offer_specialist,
         END_CALL / TRANSFER_CALL instructions, the greeting instruction) is
-        removed first. Previously each turn appended another system message
-        that stayed in the context for the rest of the call, so old facts and
-        old "append [END_CALL] / [TRANSFER_CALL]" instructions kept steering
-        later replies.
+        removed first so old facts cannot leak into later turns.
 
-        The new directive sits just before the customer's latest message.
+        The new directive is appended at the END of the context as a "user"
+        message AFTER the customer's latest message.  This keeps the facts
+        immediately adjacent to the model's current decision point and avoids
+        Qwen's chat-template behaviour of merging all "system" messages into
+        a single block at the top of the prompt (which buries late-arriving
+        facts far from the customer's latest utterance).
         """
         kept = [m for m in ctx.messages if not self._is_directive(m)]
 
         if text:
-            directive = {"role": "system", "content": f"{DIRECTIVE_TAG}\n{text.strip()}"}
-            idx = len(kept)
-            for i in range(len(kept) - 1, -1, -1):
-                if self._role(kept[i]) == "user":
-                    idx = i
-                    break
-            kept.insert(idx, directive)
+            directive = {"role": "user", "content": f"{DIRECTIVE_TAG}\n{text.strip()}"}
+            kept.append(directive)
 
         self._set_messages(ctx, kept)
 
@@ -647,7 +651,25 @@ class LLMDrivenRAGProcessor(FrameProcessor):
                 ),
                 timeout=RAG_TIMEOUT_S,
             )
-            return facts or ""
+            facts = facts or ""
+            if not facts:
+                return ""
+            # Drop the refine output's trailing question if it ends with "?".
+            # The refine LLM sometimes appends "Would you like more details...?"
+            # which competes with the closing question the main LLM must ask.
+            paragraphs = facts.strip().split("\n\n")
+            last = paragraphs[-1].strip()
+            # Check last sentence of the last paragraph
+            sentences = [s.strip() for s in last.replace("?", "?\n").splitlines() if s.strip()]
+            if sentences and sentences[-1].endswith("?"):
+                # Remove the trailing question sentence
+                trimmed_sentences = sentences[:-1]
+                if trimmed_sentences:
+                    paragraphs[-1] = " ".join(trimmed_sentences)
+                else:
+                    paragraphs = paragraphs[:-1]
+                facts = "\n\n".join(paragraphs).strip()
+            return facts
         except asyncio.TimeoutError:
             logger.warning(f"[RAG] Lookup exceeded {RAG_TIMEOUT_S}s - continuing without facts")
             return ""
@@ -711,6 +733,10 @@ CONVERSATION SO FAR:
 LATEST CUSTOMER MESSAGE (strongest signal):
 {user_text}
 
+SPECIALIST OFFER TRACKING (for this call so far):
+Specialist offers made: {self._specialist_offers_made}
+Customer turns since last offer: {self._turns_since_last_offer}
+
 HOW TO DECIDE
 0. If Priya's last message asked "am I speaking with <name>?" and the reply is "No", "wrong number" or otherwise shows this is not that person,
    choose wrong_person. That "No" is NOT a loan rejection.
@@ -727,15 +753,20 @@ HOW TO DECIDE
    Do NOT make the customer choose a loan first. Query: a concise overview of relevant KBS Bank loan products.
 4. Question or objection that needs a bank fact -> one focused query for that fact. If it can be handled conversationally -> no RAG.
 5. Keep moving the conversation forward like a real salesperson. Think one step ahead only.
-6. CLOSING PUSH: look at what the salesperson already said. If Priya has already given loan information and the customer only
-   acknowledges passively ("okay", "hmm", "fine", "I see", "ok ok", "acha") or shows mild interest, do NOT just repeat information and
-   do NOT let the call drift. A passive reply is not a "no". A real salesperson now asks for the next step:
-   choose offer_specialist so Priya asks if they want to go ahead / take this loan and offers to connect them with a loan specialist.
-   Only stay in sell if the customer has not yet heard any product information, or is still asking questions that need answers.
+6. WHEN TO OFFER A SPECIALIST: Choose offer_specialist when the customer has heard relevant information AND shows interest or buying
+   signals, asks about applying/eligibility/documents/next steps, or the conversation has reached a natural closing point.
+   A passive "okay" or "hmm" after information is NOT automatically a trigger; judge from the whole conversation whether to share more
+   relevant info, ask a need-discovery question, or offer the specialist.
+   Do NOT offer a specialist as a reflex. Repeating the same offer on consecutive turns is never appropriate.
 7. If Priya's last message offered a specialist or asked whether to proceed, and the customer agrees in any way
    ("okay", "yes", "sure", "go ahead", "please"), choose transfer.
-8. Persist politely: if the customer declined a specialist offer but did not reject loans altogether, continue selling
-   and offer again after the next useful piece of information. A clear "no / not interested / no need / stop" is a rejection -> end_call immediately. A passive "okay" or "hmm" is NOT a rejection.
+8. AFTER A DECLINED OFFER: If the customer declined or deflected a specialist offer ("no", "not now", "let me think"),
+   that declines the specialist — NOT the loan. Go back to marketing the loan: acknowledge briefly, then use a
+   focused RAG query for another relevant aspect (a feature, eligibility, documents, charges, a benefit tied to what they said)
+   or ask a natural question about their plans, timing or concern. Choose sell or pitch_overview accordingly.
+   Re-offering later is fine when something has changed: new interest, a buying signal, the customer asks, or the
+   conversation has clearly progressed since the decline. Never re-offer simply because some turns have passed.
+9. A clear "no / not interested / no need / stop" is a rejection -> end_call immediately.
 
 RAG RULES
 - needs_rag = true only when the next reply needs a KBS Bank-specific fact (rates, amounts, tenure, eligibility, fees, documents, conditions, features).
@@ -748,10 +779,10 @@ next_action - choose exactly one:
 - reschedule: customer is busy / not now / asks to be called later
 - end_call: customer clearly wants to end the conversation, stop being called, OR is clearly not interested ("not interested", "no need", "I don't want any loan", "no thanks"). Do not keep pitching.
 - transfer: customer wants a specialist, wants to apply, is ready to proceed, or agreed to Priya's specialist / proceed offer
-- offer_specialist: information has been shared and the customer is interested OR only acknowledging passively; time to ask if they want to go ahead and offer a specialist
+- offer_specialist: customer has heard relevant information and shows genuine interest, buying signals, or asks about applying/eligibility/documents/next steps; or the conversation has reached a natural closing point
 - e_transfer: customer requests an e-transfer / payment action
 - pitch_overview: no specific need yet; introduce KBS Bank and its loan options to create interest
-- sell: anything else in the sales conversation (explain a product, answer a question, handle an objection, discover a need)
+- sell: anything else in the sales conversation (explain a product, answer a question, handle an objection, discover a need, continue after a declined specialist offer)
 For wrong_person, reschedule, end_call, transfer and e_transfer: needs_rag = false and rag_query = "".
 
 Return ONLY valid JSON with exactly this structure:
@@ -771,8 +802,9 @@ Return ONLY valid JSON with exactly this structure:
 Examples of the mapping (outputs abbreviated):
 Customer "Yes, I have time." -> next_action pitch_overview, known_product none, needs_rag true, rag_query "KBS Bank loan products and key customer-facing features for an outbound introduction".
 Customer "I'm planning to buy a house." -> next_action sell, known_product home loan, needs_rag true, rag_query "KBS Bank home loan options, loan amount, interest rate and repayment tenure for a customer planning to buy a home".
-Priya just explained home loan rate and tenure; Customer "Okay." -> next_action offer_specialist, needs_rag false, rag_query "".
+Priya just explained home loan rate and tenure; Customer "Okay." -> next_action sell (or offer_specialist if natural closing point), judge from full conversation.
 Priya just asked "Would you like me to connect you with a specialist?"; Customer "Okay." -> next_action transfer, needs_rag false, rag_query "".
+Priya just offered a specialist; Customer "No, not now." -> next_action sell, needs_rag true (query for another relevant product aspect), rag_query "KBS Bank home loan eligibility and documents required".
 Priya asked "am I speaking with Mohith?"; Customer "No, this is his brother." -> next_action wrong_person, needs_rag false, rag_query "".
 Customer "I'm not interested." -> next_action end_call, needs_rag false, rag_query "".
 Customer "Call me tomorrow, I'm busy." -> next_action reschedule, needs_rag false, rag_query "".
@@ -804,15 +836,11 @@ Customer "Call me tomorrow, I'm busy." -> next_action reschedule, needs_rag fals
         try:
             timeout = aiohttp.ClientTimeout(total=PLANNER_TIMEOUT_S)
 
-            groq_key = os.getenv("GROQ_KEY", "")
-            headers = {"Authorization": f"Bearer {groq_key}"} if groq_key else {}
-
             async with aiohttp.ClientSession(timeout=timeout) as session:
 
                 async with session.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    json=payload,
-                    headers=headers,
+                    f"{OLLAMA_BASE_URL}/chat/completions",
+                    json=payload
                 ) as response:
 
                     if response.status != 200:
@@ -898,13 +926,16 @@ Customer "Call me tomorrow, I'm busy." -> next_action reschedule, needs_rag fals
 
         # Greeting run (LLMRunFrame) or any frame where the customer did not
         # just speak: nothing to plan.
-        if not messages or self._role(messages[-1]) != "user":
+        # Strip directive messages before checking roles/text so that a
+        # directive injected as "user" does not look like a customer turn.
+        real_messages = [m for m in messages if not self._is_directive(m)]
+        if not real_messages or self._role(real_messages[-1]) != "user":
             await self.push_frame(frame, direction)
             return
 
-        user_text = self._msg_text(messages[-1])
+        user_text = self._msg_text(real_messages[-1])
         turn_key = (
-            sum(1 for m in messages if self._role(m) == "user"),
+            sum(1 for m in real_messages if self._role(m) == "user"),
             user_text,
         )
 
@@ -966,6 +997,20 @@ Exception: if the customer clearly says they can talk now, OR the intended custo
             logger.warning(f"[PLANNER] Unknown next_action {next_action!r} -> sell")
             next_action = "sell"
 
+        # ── Part 2: back-to-back offer_specialist guard ──────────────────
+        # If the planner chose offer_specialist on consecutive turns and the
+        # customer's previous reply was not an agreement, treat it as sell.
+        if (
+            next_action == "offer_specialist"
+            and self._last_action == "offer_specialist"
+        ):
+            # The customer did NOT agree (otherwise the planner would have
+            # picked transfer). Offering again immediately is the loop.
+            logger.warning(
+                "[PLANNER] Back-to-back offer_specialist detected -> treating as sell"
+            )
+            next_action = "sell"
+
         if next_action == "end_call":
             logger.info("[PLANNER] Next action = end_call")
             self.call_ended = True
@@ -977,6 +1022,7 @@ Call the end_conversation function now with reason="not_interested" (use reason=
 Do NOT write any spoken text in this reply - the apology and goodbye are spoken right after the function runs.
 """)
 
+            self._last_action = "end_call"
             await self.push_frame(frame, direction)
             return
 
@@ -992,6 +1038,7 @@ Do NOT introduce any loan or share any bank or loan details with this person. Do
 - If {self.customer_name} is simply not available or they know {self.customer_name}: apologise briefly for the inconvenience (ONE or TWO short sentences) and politely ask when would be a good time to reach {self.customer_name}. Do NOT call any function yet.
 - If they say {self.customer_name} is available and will come on the line: apologise briefly and ask them to please hand over the phone. Do NOT call any function.""")
 
+            self._last_action = "wrong_person"
             await self.push_frame(frame, direction)
             return
 
@@ -1004,25 +1051,34 @@ Do NOT pitch any product.
 - If {self.customer_name} already gave a time in this message (e.g. "tomorrow", "after 5", "10 AM"): call the end_conversation function now with reason="callback_scheduled" and callback_time set to that time. Do NOT write any spoken text in this reply - the confirmation and goodbye are spoken right after the function runs.
 - Otherwise ask: "Of course, no problem, sorry for the bad timing - when would be a better time for me to call you back?" Do NOT call any function yet.""")
 
+            self._last_action = "reschedule"
             await self.push_frame(frame, direction)
             return
 
         if next_action == "offer_specialist":
             logger.info("[PLANNER] Next action = offer_specialist")
 
+            # Vary wording if this is a repeated offer
+            if self._specialist_offers_made > 0:
+                offer_wording = (
+                    f"You've previously offered to connect {self.customer_name} with a specialist. "
+                    f"This time, tie the offer to what they just showed interest in — word it differently and naturally. "
+                    f"Do not repeat the same phrasing as before."
+                )
+            else:
+                offer_wording = (
+                    "Briefly acknowledge what the customer just said or asked. "
+                    "Mention that a loan specialist can give them full details and get things started quickly. "
+                    "Ask if they would like to be connected — keep it warm and natural."
+                )
+
             self._inject(ctx, f"""
 The internal conversation planner has determined that {self.customer_name} has heard the loan
 information and it is time to move the sale to the next step.
 
-This is the right moment to ask if they would like to go ahead with the loan and to
-proactively offer to connect them with a loan specialist.
+{offer_wording}
 
-Do the following:
-1. Briefly acknowledge what the customer just said or asked.
-2. Mention that a loan specialist can give them full details and get things started quickly.
-3. Ask if they would like to be connected — keep it warm and natural.
-
-Example:
+Example (for first offer):
 "That's a great question — our loan specialists have all the exact details on rates and
 eligibility. Would you like me to connect you with one of them right now so they can
 walk you through everything?"
@@ -1037,6 +1093,10 @@ Do NOT ask another unrelated question in the same turn.
 Never mention functions or internal systems to the customer.
 """)
 
+            # Update counters AFTER injecting so they reflect this turn
+            self._specialist_offers_made += 1
+            self._turns_since_last_offer = 0
+            self._last_action = "offer_specialist"
             await self.push_frame(frame, direction)
             return
 
@@ -1053,6 +1113,7 @@ Do NOT write any spoken text in this reply - the short transition message
 Do not ask another question.
 """)
 
+            self._last_action = "transfer"
             await self.push_frame(frame, direction)
             return
 
@@ -1068,6 +1129,7 @@ Say in ONE or TWO short sentences that a KBS Bank specialist will help with that
 Do not pitch any product.
 """)
 
+            self._last_action = "e_transfer"
             await self.push_frame(frame, direction)
             return
 
@@ -1109,16 +1171,18 @@ Do not pitch any product.
             )
 
             self._inject(ctx, f"""NEXT ACTION: {next_action}
-KNOWN PRODUCT: {known_product}
-CUSTOMER NEED: {customer_need}
-SALES GOAL: {sales_goal}
-
-VERIFIED KBS BANK FACTS (reference notes - use only what is relevant, do not read them out word for word):
+CUSTOMER JUST SAID: "{user_text}"
+VERIFIED KBS BANK INFORMATION (from the bank's product guide):
 {facts}
 
-{how_to_speak}
+REPLY RULES - follow exactly:
+1. Your reply MUST begin by telling the customer this information, in your own natural spoken words as Priya. Include every figure (amounts, rates, tenure) exactly as written above. Present it as what KBS Bank offers, not as something the customer asked for.
+2. Do NOT ask what they are planning, and do NOT ask how you can help, BEFORE you have told them this information.
+3. After that, ask exactly ONE short question that moves the sale forward.
+4. Use ONLY the information above for bank-specific details. If something the customer asked is not covered, say a loan specialist can confirm it.
+5. Never say "How can I help you?". 3-4 short sentences. Never mention notes, RAG or internal systems.
 {offer_line}
-Use ONLY the facts above for bank-specific details. Keep response to 2-3 sentences. NEVER invent facts. NEVER mention RAG or internal systems.""")
+(Mention a specialist only if next_action == offer_specialist or if the facts do not cover something the customer asked.)""")
 
         elif rag_attempted:
             logger.info("[RAG] No confident result found")
@@ -1137,14 +1201,20 @@ Keep response to 1-2 sentences. NEVER mention RAG or internal systems.""")
 CUSTOMER NEED: {customer_need}
 SALES GOAL: {sales_goal}
 
-Respond naturally as a salesperson to advance this goal. If the customer has already heard loan information, ask if they would like to proceed.
-Do NOT state any KBS Bank rate, amount, tenure, eligibility, fee or condition - none is verified for this turn.
+Keep marketing the loan itself. Acknowledge what the customer said, then ask ONE question about their plans or timing, or point to one reason the loan could fit their situation.
+Do NOT state any KBS Bank rate, amount, tenure, eligibility, fee or condition — none is verified for this turn.
+Do NOT mention a specialist in this reply.
 Keep response to 1-2 sentences.""")
 
         else:
             logger.info("[RAG] Not required for this turn")
             # Still clear last turn's directive/facts so they cannot leak in.
             self._inject(ctx, None)
+
+        # Update turn-since-offer counter and last_action for all sell/pitch paths
+        if self._last_action == "offer_specialist":
+            self._turns_since_last_offer += 1
+        self._last_action = next_action
 
         logger.info(
             f"[LATENCY] Planner + RAG before main LLM: {time.time() - turn_started:.2f}s"
@@ -1396,7 +1466,7 @@ def create_initial_node(customer_name: str = "", greeted: bool = False) -> NodeC
                 "content": (
                     f"The intended customer is {customer_name}.\n"
                     f"You have already asked: \"Hi, am I speaking with {customer_name}?\" - wait for the reply.\n\n"
-                    "From now on every customer turn is preceded by an internal "
+                    "From now on every customer turn is followed by an internal "
                     "[TURN INSTRUCTION - internal, never read aloud]. Follow it exactly.\n"
                     "- Call end_conversation ONLY when the turn instruction tells you to end the call.\n"
                     "- Call transfer_to_agent ONLY when the turn instruction tells you to transfer the call.\n"

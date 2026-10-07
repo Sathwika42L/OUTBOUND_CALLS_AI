@@ -28,7 +28,8 @@ from pipecat.frames.frames import (
 )
 from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
 from pipecat.services.piper.tts import PiperTTSService
-from pipecat.services.openai.llm import OpenAILLMService
+# from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.ollama.llm import OLLamaLLMService
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.audio.filters.rnnoise_filter import RNNoiseFilter
@@ -43,7 +44,7 @@ from pipecat_flows import FlowManager
 from test_rag_simple import SimpleRAG
 
 # Flow (nodes, functions, planner + RAG processor)
-from minnu_flow import (
+from flow_perfect import (
     CAMPAIGN,
     CUSTOMER_NAME,
     OLLAMA_BASE_URL,
@@ -125,22 +126,39 @@ async def run_bot(transport: BaseTransport):
             eot_timeout_ms=1500
         )
     )
+    # from nemo_stt_client import NemotronWebSocketSTTService
+
+    # stt = NemotronWebSocketSTTService(
+    #     url="ws://127.0.0.1:9092",
+    #     language="en-US",
+    #     sample_rate=16000,
+    #     ttfs_p99_latency=0.15,
+    # )
     
     # TTS
-    tts = PiperTTSService(
-        use_cuda=True,
-        settings=PiperTTSService.Settings(
-            voice="en_US-hfc_female-medium"
-        ),
-        text_aggregation_mode=TextAggregationMode.SENTENCE
+    # tts = PiperTTSService(
+    #     use_cuda=True,
+    #     settings=PiperTTSService.Settings(
+    #         voice="en_US-hfc_female-medium"
+    #     ),
+    #     text_aggregation_mode=TextAggregationMode.SENTENCE
+    # )
+    from qwen_ws_tts_service import QwenWSTTSService
+    
+    tts = QwenWSTTSService(
+        url="http://127.0.0.1:8888",      # your server address, see below
+        api_key="choose-a-secret",        # the same TTS_API_KEY you gave the server
+        text_aggregation_mode=TextAggregationMode.SENTENCE,
     )
     
-    # LLM — same Groq backend as minnu.py
-    llm = OpenAILLMService(
-        api_key=os.getenv("GROQ_KEY"),
-        base_url="https://api.groq.com/openai/v1",
-        model=os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
-    )
+    llm = OLLamaLLMService(
+            base_url="http://16.192.104.155:11434/v1",
+            settings=OLLamaLLMService.Settings(
+                model="qwen2.5:14b",
+                temperature=0.3,  # More creative for natural conversation
+                top_p=0.8,
+            )
+        )
 
     # Context starts EMPTY: the persona (role_messages) comes from the initial Flow node
     context = LLMContext()

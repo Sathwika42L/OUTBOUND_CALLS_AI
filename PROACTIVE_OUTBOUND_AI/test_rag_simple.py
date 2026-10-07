@@ -71,15 +71,15 @@ COLLECTION_NAME = "knowledge_base"
 EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"  # BGE-large
 EMBEDDING_DIM = 1024
 
-# # LLM for natural answers (using your Ollama)
-# LLM_BASE_URL = "http://202.164.134.176:11434/v1"
-# LLM_MODEL = "qwen2.5:14b"
-from dotenv import load_dotenv
-load_dotenv()
+# LLM for natural answers (using your Ollama)
+LLM_BASE_URL = "http://16.192.104.155:11434/v1"
+LLM_MODEL = "qwen2.5:14b"
+# from dotenv import load_dotenv
+# load_dotenv()
 
-# LLM for natural answers (Groq)
-LLM_BASE_URL = "https://api.groq.com/openai/v1"
-LLM_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")   # same model as bot file
+# # LLM for natural answers (Groq)
+# LLM_BASE_URL = "https://api.groq.com/openai/v1"
+# LLM_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")   # same model as bot file
 
 # Chunking - smaller than before (400 -> 220 words) so each chunk stays
 # topically tight, which improves embedding precision and keeps the
@@ -116,12 +116,13 @@ class SimpleRAG:
 
         # Load BGE-large
         logger.info("Loading {}...", EMBEDDING_MODEL)
-        try:
-            self.embedder = SentenceTransformer(EMBEDDING_MODEL, device="cuda")
-            logger.info("✅ BGE-large loaded on GPU")
-        except Exception:
-            self.embedder = SentenceTransformer(EMBEDDING_MODEL, device="cpu")
-            logger.info("✅ BGE-large loaded on CPU")
+        # try:
+        #     self.embedder = SentenceTransformer(EMBEDDING_MODEL, device="cuda")
+        #     logger.info("✅ BGE-large loaded on GPU")
+        # except Exception:
+        #     self.embedder = SentenceTransformer(EMBEDDING_MODEL, device="cpu")
+        #     logger.info("✅ BGE-large loaded on CPU")
+        self.embedder = SentenceTransformer(EMBEDDING_MODEL, device="cpu")
 
         # Initialize Qdrant
         os.makedirs(QDRANT_PATH, exist_ok=True)
@@ -142,8 +143,8 @@ class SimpleRAG:
         logger.info("📊 Total chunks: {}", count)
 
         # Initialize LLM
-        # self.llm = OpenAI(base_url=LLM_BASE_URL, api_key="not-needed")
-        self.llm = OpenAI(base_url=LLM_BASE_URL, api_key=os.getenv("GROQ_KEY"))
+        self.llm = OpenAI(base_url=LLM_BASE_URL, api_key="not-needed")
+        # self.llm = OpenAI(base_url=LLM_BASE_URL, api_key=os.getenv("GROQ_KEY"))
         logger.info("✅ LLM ready: {}", LLM_MODEL)
         logger.info("=" * 80)
 
@@ -513,13 +514,14 @@ HOW TO MARKET WITH THOSE FACTS:
             """
     
             logger.info("🔎 Generated RAG query: {}", rag_query)
-    
+
             context, found, results = self.retrieve_answer(
                 rag_query=rag_query,
                 min_score=min_score,
                 top_k=10,
                 max_unique_chunks=3
             )
+            print("context:",context)
     
             # Debug-only, truncated preview instead of dumping full context +
             # all raw results to stdout on every call.

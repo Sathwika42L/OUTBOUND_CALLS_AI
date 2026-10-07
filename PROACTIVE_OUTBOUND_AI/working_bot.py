@@ -971,6 +971,25 @@ class LLMDrivenRAGProcessor(FrameProcessor):
         # True after we asked the customer for a callback time
         self.reschedule_pending = False
 
+        # number of customer messages already planned for
+        self._seen_user_count = 0
+
+    GREETING_MARKER = "This is the very first message of your outbound call"
+
+    @staticmethod
+    def _latest_user_message(context):
+        """Returns (text of the latest user message, number of user messages) from the LLM context."""
+        msgs = context.get_messages() if hasattr(context, "get_messages") else context.messages
+        count, text = 0, ""
+        for m in msgs:
+            if isinstance(m, dict) and m.get("role") == "user":
+                count += 1
+                c = m.get("content", "")
+                if isinstance(c, list):
+                    c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+                text = str(c).strip()
+        return text, count
+
     async def ask_planner_llm(self, user_text: str):
         """
         Planner LLM:
@@ -1182,24 +1201,30 @@ Customer "Call me tomorrow, I'm busy." -> next_action reschedule, needs_rag fals
 
         user_text = None
 
-        if isinstance(frame, (TranscriptionFrame, TextFrame)):
+        # The planner now sits AFTER the user aggregator: it reacts to the finished user turn
+        # (the LLM context frame) instead of holding the raw transcription frame.
+        if (
+            frame.__class__.__name__ in ("LLMContextFrame", "OpenAILLMContextFrame")
+            and direction == FrameDirection.DOWNSTREAM
+        ):
 
             # If call already ended, ignore all further customer input
             if self.call_ended:
                 await self.push_frame(frame, direction)
                 return
 
-            user_text = frame.text.strip()
+            user_text, user_count = self._latest_user_message(frame.context)
 
-            if not user_text:
+            # Nothing new from the customer (e.g. the opening greeting): straight to the LLM
+            if (
+                not user_text
+                or user_count == self._seen_user_count
+                or user_text.startswith(self.GREETING_MARKER)
+            ):
                 await self.push_frame(frame, direction)
                 return
 
-            # Prevent duplicate input
-            if user_text == self.last_user_text:
-                await self.push_frame(frame, direction)
-                return
-
+            self._seen_user_count = user_count
             self.last_user_text = user_text
 
             logger.info("=" * 80)
@@ -1573,8 +1598,8 @@ async def run_bot(transport):
         transport.input(),
         mute_stt,
         stt,
-        llm_rag_planner,  # ← RAG INTERCEPTS HERE (voice + text)
         context_aggregator.user(),
+        llm_rag_planner,  # runs on the COMPLETED user turn, right before the LLM
         llm,
         end_call_processor,
         transfer_processor,

@@ -296,7 +296,7 @@ if __name__ == "__main__":
     import soundfile as sf
 
     ref = sys.argv[1] if len(sys.argv) > 1 else os.getenv("TTS_REF_AUDIO", "sathwika_voice.mp3")
-    txt = sys.argv[2] if len(sys.argv) > 2 else os.getenv("TTS_REF_TEXT", "")
+    txt = sys.argv[2] if len(sys.argv) > 2 else os.getenv("TTS_REF_TEXT", "Hi.Hello how are you all,I am sathwika,Today i am calling you to make happy, once again congratulations,have a nice day")
     svc = VoiceCloneTTSService(ref_audio=ref, ref_text=txt)
     print("Backend:", svc.backend_name)
     for emo in ("neutral", "happy"):
