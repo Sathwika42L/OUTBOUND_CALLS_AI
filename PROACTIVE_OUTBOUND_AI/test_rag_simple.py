@@ -70,12 +70,12 @@ QDRANT_PATH = "./knowledge_base/qdrant_db"
 COLLECTION_NAME = "knowledge_base"
 EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"  # BGE-large
 EMBEDDING_DIM = 1024
-
+from dotenv import load_dotenv
+load_dotenv()
 # LLM for natural answers (using your Ollama)
-LLM_BASE_URL = "http://16.192.104.155:11434/v1"
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_MODEL = "qwen2.5:14b"
-# from dotenv import load_dotenv
-# load_dotenv()
+
 
 # # LLM for natural answers (Groq)
 # LLM_BASE_URL = "https://api.groq.com/openai/v1"

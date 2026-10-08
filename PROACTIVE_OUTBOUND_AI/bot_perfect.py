@@ -83,12 +83,6 @@ class MuteSTTDuringTTS(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MAIN BOT LOGIC
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-# Module-level RAG instance — loaded once at startup before any call arrives.
 # run_bot() reuses it so the cold-start delay never blocks a live WebRTC connection.
 _shared_rag: "SimpleRAG | None" = None
 
@@ -152,7 +146,7 @@ async def run_bot(transport: BaseTransport):
     )
     
     llm = OLLamaLLMService(
-            base_url="http://16.192.104.155:11434/v1",
+            base_url=os.getenv("LLM_BASE_URL"),
             settings=OLLamaLLMService.Settings(
                 model="qwen2.5:14b",
                 temperature=0.3,  # More creative for natural conversation

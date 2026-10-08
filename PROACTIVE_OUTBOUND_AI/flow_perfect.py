@@ -64,7 +64,7 @@ CAMPAIGN = {
 CUSTOMER_NAME = os.getenv("TEST_CUSTOMER_NAME", "Sathwika")
 
 # Ollama server used by the main LLM and the planner
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://16.192.104.155:11434/v1")
+OLLAMA_BASE_URL = os.getenv("LLM_BASE_URL")
 PLANNER_MODEL = os.getenv("GROQ_MODEL", "qwen2.5:14b")
 
 # A phone caller cannot wait 30 s. If the planner / RAG are slower than this the
@@ -1231,10 +1231,13 @@ END_REASONS = ["not_interested", "customer_ended", "wrong_number", "callback_sch
 
 END_REASON_GUIDANCE = {
     "not_interested": (
-        "Apologise briefly for taking their time, thank them, and say a warm goodbye - "
-        "one or two short sentences only.\n"
-        'Example: "I\'m sorry to have disturbed you, thank you for your time. Have a great day!"\n'
-        "Do not ask any question. Do not mention loans or try to convince them again."
+        "The customer is not interested. Acknowledge their decision warmly without pressure. "
+        "Thank them for their time, let them know KBS Bank is always available if their needs change, "
+        "and wish them well — two to three short natural sentences.\n"
+        'Example: "No problem at all, I completely understand. Thank you so much for your time today. '
+        'If you ever need any financial support in future, KBS Bank is always here for you — '
+        'have a wonderful day!"\n'
+        "Do not ask any question. Do not pitch any product. Do not pressure them."
     ),
     "customer_ended": (
         "The customer wants to end the call. Thank them for their time and say a warm goodbye - "
@@ -1242,7 +1245,7 @@ END_REASON_GUIDANCE = {
     ),
     "wrong_number": (
         "You reached the wrong person. Apologise briefly for the inconvenience, thank them and say goodbye - "
-        "one or two short sentences only. Do not mention any loan or bank detail."
+        "one or two short sentences only. Do not mention any loan or bank detail.Do not ask any question"
     ),
     "callback_scheduled": (
         "Confirm the callback time in ONE warm sentence, then say goodbye. "
